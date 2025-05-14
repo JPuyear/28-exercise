@@ -1,0 +1,16 @@
+project:
+  title: "esss-330-daily-exercise-28"
+  output-dir: docs
+  type: website
+  
+website: 
+  title: "ESS 330 Daily Exercises-28"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+
+format:
+  html:
+    self-contained: true
+    toc: true
