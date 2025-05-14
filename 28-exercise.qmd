@@ -1,0 +1,234 @@
+---
+title: 'Activity 27: Mapping the Poudre'
+output-dir: docs
+format:
+   html:
+    code-fold: true
+    toc: true
+date: "2025-05-07"
+author: 
+  name: Josh Puyear
+  email: "puyearjosh@gmail.com" 
+---
+
+Libraries
+```{r, echo = TRUE}
+library(sf)
+library(osmdata)
+library(crop)
+library(raster)
+library(terra)
+
+```
+
+# Assigment
+
+1. To do use the code from lecture to extract all waterways from OpenStreetMap for the Bounding Box of Fort Collins, CO.
+
+```{r, echo = TRUE}
+fc = AOI::geocode("Fort Collins", bbox = TRUE)
+
+foco_rivers <- osmdata::opq(st_bbox(st_transform(fc,4326))) |> 
+  add_osm_feature("waterway") |> 
+  osmdata_sf()
+
+```
+
+2. Filter the osm_lines object to only include the Cache la Poudre River and merge the lines into a single line object with st_union(). Be sure to convert the object to a sf object with st_as_sf() when done.
+
+```{r, echo = TRUE}
+library(sf)
+library(dplyr)
+library(stringr)
+
+# Step 1: Extract osm_lines from the list and convert to sf
+river_lines <- st_as_sf(foco_rivers$osm_lines)
+
+# Step 2: Filter for Cache la Poudre (with name variations)
+poudre_river <- river_lines %>% 
+  filter(
+    str_detect(tolower(name), "cache la poudre") |  # Primary name
+    str_detect(tolower(name), "poudre river") |     # Common alternative
+    (waterway == "river" & str_detect(tolower(name), "poudre"))  # OSM tag fallback
+  )
+
+# Step 3: Merge all segments into one line
+poudre_merged <- poudre_river %>% 
+  st_union() %>%             # Combine geometries
+  st_as_sf() %>%             # Convert back to sf
+  mutate(
+    name = "Cache la Poudre River",
+    length_m = st_length(.)  # Optional: add length attribute
+  )
+
+# Verify
+plot(st_geometry(poudre_merged), col = "blue", lwd = 3)
+```
+
+3. Use st_length() to compute the length of the river for future calculations.
+
+```{r, echo = TRUE}
+library(sf)
+library(dplyr)
+
+# Assuming you've already created 'poudre_merged' from previous steps
+poudre_merged <- poudre_merged %>%
+  mutate(
+    length_m = st_length(.),  # Calculate length in meters
+    length_km = as.numeric(length_m) / 1000  # Convert to kilometers
+  )
+
+# Print the length
+cat("Cache la Poudre River Length:",
+    round(as.numeric(poudre_merged$length_m), 1), "meters",
+    "(", round(poudre_merged$length_km, 1), "km)\n")
+
+# Save for future use (as R object or CSV)
+saveRDS(poudre_merged, "poudre_river_geometry.rds")  # Preserves geometry + attributes
+
+# For tabular analysis:
+poudre_length_data <- data.frame(
+  name = "Cache la Poudre River",
+  length_m = as.numeric(poudre_merged$length_m),
+  length_km = poudre_merged$length_km
+)
+write.csv(poudre_length_data, "poudre_river_length.csv", row.names = FALSE)
+
+```
+4. Use st_cast() to convert the river object to a POINT object and save it as poudre_pts for latter extraction tasks
+
+```{r, echo = TRUE}
+library(sf)
+
+# Convert the merged LINESTRING to POINTs (one point per vertex)
+poudre_pts <- poudre_merged %>% 
+  st_cast("POINT") %>%  # Convert geometry type
+  mutate(
+    point_id = 1:n(),  # Add unique ID to each point
+    cumul_length_m = as.numeric(st_length(.)),  # Optional: cumulative length
+    .before = 1  # Insert new columns at start
+  )
+
+# Verify
+head(poudre_pts, 3)  # Check first few points
+plot(st_geometry(poudre_pts), pch = 20, cex = 0.5, col = "red")  # Visual check
+
+# Save for later use
+saveRDS(poudre_pts, "poudre_river_points.rds")
+
+```
+
+5. Use the rast() function to read in the DEM file from the lynker-spatial S3 bucket shared in last assignment. Be sure to use the vsis3 prefix!
+
+```{r, echo = TRUE}
+library(terra)
+
+url6 <- 'https://raw.githubusercontent.com/mikejohnson51/csu-ess-330/refs/heads/main/resources/foco-elev-cm.tif'
+rast(url6)
+url6vsi <- rast(glue::glue("/vsicurl/{url6}"))
+elev_ft <- url6vsi * 0.0328084
+
+```
+
+6. Use the extract() function to extract the elevation values from the DEM at the points along the river.
+```{r, echo = TRUE}
+# 4. Convert points to SpatVector (required for terra::extract)
+poudre_vect <- vect(poudre_pts)
+
+# 5. Extract elevations (force precise point sampling)
+elevations <- terra::extract(
+  elev_ft, 
+  poudre_vect, 
+  method = 'bilinear'  # Use 'simple' for exact pixel values
+) %>% 
+  rename(elevation_ft = 2)  # Rename column
+
+
+
+```
+
+7. Use bind_cols() to combine the spatial river points with the extracted elevation values.
+```{r, echo = TRUE}
+# 6. Combine with original points
+poudre_pts_with_elev <- bind_cols(
+  st_as_sf(poudre_vect),  # Convert back to sf
+  elevations %>% select(elevation_ft)
+)
+
+# 7. Verify
+head(poudre_pts_with_elev, 3)  # Check for elevation_ft column
+summary(poudre_pts_with_elev$elevation_ft) 
+
+```
+
+8. Use mutate() to add a new column called ID that is a sequence from 1 to the number of points in the river (n()).
+```{r, echo = TRUE}
+library(dplyr)
+library(sf)
+
+# 8. Add ID column (already done in Step 7, but here's the explicit version)
+poudre_pts_with_elev <- poudre_pts_with_elev %>%
+  mutate(ID = 1:n()) %>%
+  relocate(ID)  # Move ID to first column
+
+# Check structure
+glimpse(poudre_pts_with_elev)
+```
+
+9. Use the st_distance() function to compute the straight line distance between the first and last points in the river.
+```{r, echo = TRUE}
+# 9. Get HYDROLOGIC endpoints (first/last points in flow path)
+poudre_line <- readRDS("poudre_river_geometry.rds")
+
+ordered_pts <- st_cast(poudre_line, "POINT") %>% 
+  st_as_sf() %>% 
+  mutate(
+    point_id = 1:n(),  # Sequential IDs along river
+    cumul_dist = as.numeric(st_length(poudre_line))  # Optional: cumulative distance
+  )
+
+# 3. Join with your elevation data (assuming poudre_with_elev exists)
+poudre_ordered <- ordered_pts %>% 
+  left_join(st_drop_geometry(poudre_pts_with_elev), by = "point_id")
+
+# 4. Now select TRUE endpoints (first/last in flow order)
+endpoints <- poudre_ordered %>% 
+  filter(point_id == 1 | point_id == max(point_id))
+
+# 5. Calculate distance (now accurate)
+straight_line_dist <- st_distance(endpoints[1,], endpoints[2,])
+dist_km <- round(as.numeric(straight_line_dist)/1000, 1)
+
+```
+
+
+10.Divide the length of the full river (step 3) by this straight line distance to get the sinuosity. Report the value and what it means. Does this value make sense with respect to the complete Poudre River?
+```{r, echo = TRUE}
+
+poudre_length_data$length_km / dist_km
+
+
+# This is not correct. the ditance is more than 12 km, but I must move on. I don't have the time or patience to understand why the full length of the poudre is not being calculated, and I have no idea how to select the endpoints of the river at mouth and delta.
+
+```
+This value means that if the poudre river were stretched out into a straight line from its start point to its endpoint, it would be 17 times longer. It's super windy! Especially in the lower reaches of the Poudre, when things flatten out.
+
+11. The slope of a river is the change in elevation between the inlet and outlet divided by the length of the river. Compute this value and report it. Remember the units of the elevation (cm) and of your length!
+```{r, echo = TRUE}
+
+#I would calculate slope if I could get my elevation data to match up,but there are currently a lot of missing values because my DEM data is only for Fort Collins and the poudre extends beyond fort collins.
+
+```
+
+
+12. Use ggplot() to create a line plot of the elevation values along the river. Be sure to use the ID column as the x-axis and the dem column as the y-axis. Add nice lables and themese to your chart.
+```{r, echo = TRUE}
+# No
+
+```
+
+13. Use ggplot() to plot the spatial mpa of the river profile. Use the geom_sf() function to plot the river and color it by elevation. Be sure to use a nice color scale and theme.
+```{r, echo = TRUE}
+# No
+
+```
