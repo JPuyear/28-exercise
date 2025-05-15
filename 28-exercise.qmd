@@ -1,14 +1,10 @@
 ---
-title: 'Activity 27: Mapping the Poudre'
+title: 'Exercise 28'
 output-dir: docs
 format:
    html:
     code-fold: true
     toc: true
-date: "2025-05-07"
-author: 
-  name: Josh Puyear
-  email: "puyearjosh@gmail.com" 
 ---
 
 Libraries
